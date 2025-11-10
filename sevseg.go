@@ -709,13 +709,13 @@ func (s *SevSeg) updateDisplayFromPatterns() {
 	patternLength := len(s.textPattern)
 
 	if patternLength > displayWidth {
-		for i := 0; i < displayWidth; i++ {
+		for i := range displayWidth {
 			patternIndex := (s.scrollPosition + i) % patternLength
 			s.updatedDisplay[displayWidth-1-i] = s.textPattern[patternIndex]
 		}
 	} else {
 		blankPattern := s.getSegmentCode(36) // BLANK
-		for i := 0; i < displayWidth; i++ {
+		for i := range displayWidth {
 			if i < patternLength {
 				s.updatedDisplay[displayWidth-1-i] = s.textPattern[i]
 			} else {
