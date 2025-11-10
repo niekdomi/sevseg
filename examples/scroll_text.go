@@ -8,7 +8,7 @@ import (
 	"machine"
 	"time"
 
-	"github.com/domi413/sevseg/sevseg"
+	"github.com/domi413/sevseg"
 )
 
 func main() {

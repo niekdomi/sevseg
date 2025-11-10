@@ -16,7 +16,7 @@ following commands to set up the module:
 
 ```bash
 go mod init {your-project} # May already be done
-go get github.com/domi413/sevseg@v0.1.1
+go get github.com/domi413/sevseg@main
 ```
 
 ## Hardware Setup
