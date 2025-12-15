@@ -1,5 +1,4 @@
-// This script displays a counting sequence from -9 to 99 on a 2-digit 7-segment display.
-// Demonstrates basic number display functionality.
+// This script displays numbers with decimal points.
 //
 // This configures a 2-digit 7-segment Common Cathode display for arduino-nano
 
@@ -9,7 +8,7 @@ import (
 	"machine"
 	"time"
 
-	"github.com/domi413/sevseg"
+	"github.com/niekdomi/sevseg"
 )
 
 func main() {
@@ -29,7 +28,7 @@ func main() {
 			machine.D10, // G
 			machine.D11, // DP
 		},
-		UseLeadingZeros: true,
+		UseLeadingZeros: false,
 	}
 
 	display, ok := sevseg.NewSevSeg(displayConfig)
@@ -37,24 +36,28 @@ func main() {
 		return
 	}
 
-	counter := int32(-9)
-	refreshCounter := 0
-	refreshesPerUpdate := 200
+	examples := []struct {
+		number  int32
+		decimal uint8
+	}{
+		{42, 0},
+		{42, 1},
+		{73, 0},
+		{18, 1},
+	}
 
-	display.SetNumber(counter)
+	index := 0
 
 	for {
-		refreshCounter++
-		if refreshCounter >= refreshesPerUpdate {
-			counter++
-			if counter > 99 {
-				counter = -9
-			}
-			display.SetNumber(counter)
-			refreshCounter = 0
+		example := examples[index]
+		display.SetNumberWithDecimal(example.number, example.decimal)
+
+		index = (index + 1) % len(examples)
+
+		for range 500 {
+			display.Refresh()
+			time.Sleep(1 * time.Millisecond)
 		}
 
-		display.Refresh()
-		time.Sleep(1 * time.Millisecond)
 	}
 }

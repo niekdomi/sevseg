@@ -1,4 +1,5 @@
-// This script displays numbers with decimal points.
+// This script cycles through all displayable letters of the alphabet.
+// Shows which letters can be displayed on a 7-segment display.
 //
 // This configures a 2-digit 7-segment Common Cathode display for arduino-nano
 
@@ -8,7 +9,7 @@ import (
 	"machine"
 	"time"
 
-	"github.com/domi413/sevseg"
+	"github.com/niekdomi/sevseg"
 )
 
 func main() {
@@ -36,28 +37,14 @@ func main() {
 		return
 	}
 
-	examples := []struct {
-		number  int32
-		decimal uint8
-	}{
-		{42, 0},
-		{42, 1},
-		{73, 0},
-		{18, 1},
-	}
-
-	index := 0
-
 	for {
-		example := examples[index]
-		display.SetNumberWithDecimal(example.number, example.decimal)
+		for i := 'A'; i <= 'Z'; i++ {
+			display.SetText(string(i))
 
-		index = (index + 1) % len(examples)
-
-		for range 500 {
-			display.Refresh()
-			time.Sleep(1 * time.Millisecond)
+			for range 400 {
+				display.Refresh()
+				time.Sleep(1 * time.Millisecond)
+			}
 		}
-
 	}
 }

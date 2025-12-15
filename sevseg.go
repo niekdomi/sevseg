@@ -1,4 +1,4 @@
-//go:build tinygo
+//go:build tinygo || !tinygo
 
 // Package sevseg is a library for controlling 7-segment displays.
 package sevseg
@@ -220,7 +220,7 @@ func (s *SevSeg) SetBrightness(brightness uint8) {
 	}
 
 	if brightness > 100 {
-		brightness = 100
+		s.brightness = 100
 	} else {
 		s.brightness = brightness
 	}

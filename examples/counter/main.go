@@ -1,5 +1,5 @@
-// This script cycles through all displayable letters of the alphabet.
-// Shows which letters can be displayed on a 7-segment display.
+// This script displays a counting sequence from -9 to 99 on a 2-digit 7-segment display.
+// Demonstrates basic number display functionality.
 //
 // This configures a 2-digit 7-segment Common Cathode display for arduino-nano
 
@@ -9,7 +9,7 @@ import (
 	"machine"
 	"time"
 
-	"github.com/domi413/sevseg"
+	"github.com/niekdomi/sevseg"
 )
 
 func main() {
@@ -29,7 +29,7 @@ func main() {
 			machine.D10, // G
 			machine.D11, // DP
 		},
-		UseLeadingZeros: false,
+		UseLeadingZeros: true,
 	}
 
 	display, ok := sevseg.NewSevSeg(displayConfig)
@@ -37,14 +37,24 @@ func main() {
 		return
 	}
 
-	for {
-		for i := 'A'; i <= 'Z'; i++ {
-			display.SetText(string(i))
+	counter := int32(-9)
+	refreshCounter := 0
+	refreshesPerUpdate := 200
 
-			for range 400 {
-				display.Refresh()
-				time.Sleep(1 * time.Millisecond)
+	display.SetNumber(counter)
+
+	for {
+		refreshCounter++
+		if refreshCounter >= refreshesPerUpdate {
+			counter++
+			if counter > 99 {
+				counter = -9
 			}
+			display.SetNumber(counter)
+			refreshCounter = 0
 		}
+
+		display.Refresh()
+		time.Sleep(1 * time.Millisecond)
 	}
 }
