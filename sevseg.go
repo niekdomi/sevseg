@@ -1,4 +1,4 @@
-//go:build tinygo || !tinygo
+//go:build tinygo
 
 // Package sevseg is a library for controlling 7-segment displays.
 package sevseg
@@ -8,23 +8,19 @@ import (
 	"time"
 )
 
-type tempUnit uint8
+// TempUnit defines the temperature unit for temperature display.
+type TempUnit uint8
 
-// TemperatureUnit defines the unit of temperature to be displayed.
-var TemperatureUnit = struct {
-	Celsius    tempUnit
-	Fahrenheit tempUnit
-}{
-	Celsius:    'C',
-	Fahrenheit: 'F',
-}
-
-type pwmType uint8
-
-// HardwarePWM and SoftwarePWM define the type of PWM used for brightness
-// control.
 const (
-	SoftwarePWM pwmType = iota
+	Celsius TempUnit = iota
+	Fahrenheit
+)
+
+// HardwarePWM and SoftwarePWM define the type of PWM used for brightness control.
+type PWMType uint8
+
+const (
+	SoftwarePWM PWMType = iota
 	HardwarePWM
 )
 
@@ -33,11 +29,11 @@ const (
 // 	channel uint8
 // }
 
-type displayType uint8
-
 // CommonAnode and CommonCathode define the type of 7-segment display.
+type DisplayType uint8
+
 const (
-	CommonAnode displayType = iota
+	CommonAnode DisplayType = iota
 	CommonCathode
 )
 
@@ -45,13 +41,13 @@ const (
 type Config struct {
 	// Hardware defines the type of 7-segment display.
 	// It can be either CommonAnode or CommonCathode.
-	Hardware displayType
+	Hardware DisplayType
 
 	// PWM defines the type of PWM used for brightness control.
 	//
 	// If you want to use the hardware PWM you need to configure PWMTimers and
 	// PWMPins.
-	PWMType pwmType
+	PWMType PWMType
 
 	// PWMPins defines the PWM pins e.g., [machine.Timer0, machine.Timer1] or
 	// [machine.PWM3, machine.PWM4] depending on the board.
@@ -71,8 +67,8 @@ type Config struct {
 
 // SevSeg represents a 7-segment display.
 type SevSeg struct {
-	config          displayType
-	pwm             pwmType
+	config          DisplayType
+	pwm             PWMType
 	digitPins       []machine.Pin
 	segmentPins     []machine.Pin
 	useLeadingZeros bool
@@ -83,7 +79,7 @@ type SevSeg struct {
 	// pwmChannels map[machine.Pin]pwmChannelMap
 
 	// Text scrolling state
-	scrollPosition int
+	scrollPosition uint8
 	textPattern    []uint8
 
 	// Refresh state
@@ -162,6 +158,11 @@ func (s *SevSeg) DisplayTest(delayMS uint16) {
 	}
 }
 
+// IsEnabled returns whether the display is currently enabled
+func (s *SevSeg) IsEnabled() bool {
+	return s.enabled
+}
+
 // Toggle can be used to toggle/blink the display. A boolean value is passed to
 // enable or disable the display.
 //
@@ -206,6 +207,11 @@ func (s *SevSeg) GetDisplayWidth() uint8 {
 func (s *SevSeg) IsCharacterSupported(char byte) bool {
 	_, ok := s.charToSegmentPattern(char)
 	return ok
+}
+
+// GetBrightness returns the current brightness level (0-100)
+func (s *SevSeg) GetBrightness() uint8 {
+	return s.brightness
 }
 
 // SetBrightness sets the brightness of the display.
@@ -340,13 +346,16 @@ func (s *SevSeg) SetHex(number uint32) bool {
 	position := 0
 	if number == 0 {
 		s.updatedDisplay[position] = s.getSegmentCode(0) // ZERO
-	} else {
-		for number > 0 && position < len(s.digitPins) {
-			digit := uint8(number) % 16
-			s.updatedDisplay[position] = s.getSegmentCode(digit)
-			number /= 16
-			position++
-		}
+
+		return true
+	}
+
+	for number > 0 && position < len(s.digitPins) {
+		digit := uint8(number) % 16
+		s.updatedDisplay[position] = s.getSegmentCode(digit)
+		number /= 16
+		position++
+
 	}
 
 	return true
@@ -402,8 +411,9 @@ func (s *SevSeg) SetTemperatureWithUnit(temperature float32, decimalPlaces uint8
 	}
 
 	s.updatedDisplay[1] = s.getSegmentCode(39) // DEGREE
-	s.updatedDisplay[0] = s.getSegmentCode(12) // 'C'
-	if unit == TemperatureUnit.Fahrenheit {
+	if unit == Celsius {
+		s.updatedDisplay[0] = s.getSegmentCode(12) // 'C'
+	} else {
 		s.updatedDisplay[0] = s.getSegmentCode(15) // 'F'
 	}
 
@@ -466,6 +476,7 @@ func (s *SevSeg) SetText(text string) bool {
 		if !ok {
 			return false
 		}
+
 		s.textPattern[i] = segment
 	}
 
@@ -482,9 +493,9 @@ func (s *SevSeg) SetText(text string) bool {
 
 // ScrollTextLeft scrolls the text to the left by one digit/segment.
 func (s *SevSeg) ScrollTextLeft() {
-	patternLength := len(s.textPattern)
+	patternLength := uint8(len(s.textPattern))
 
-	if patternLength <= len(s.digitPins) {
+	if patternLength <= uint8(len(s.digitPins)) {
 		return
 	}
 
@@ -495,9 +506,9 @@ func (s *SevSeg) ScrollTextLeft() {
 
 // ScrollTextRight scrolls the text to the right by one digit/segment.
 func (s *SevSeg) ScrollTextRight() {
-	patternLength := len(s.textPattern)
+	patternLength := uint8(len(s.textPattern))
 
-	if patternLength <= len(s.digitPins) {
+	if patternLength <= uint8(len(s.digitPins)) {
 		return
 	}
 
@@ -544,23 +555,22 @@ func (s *SevSeg) Refresh() bool {
 // checkAvailableDigits checks if the number can fit within the specified number
 // of digits.
 func (s *SevSeg) checkAvailableDigits(number int32, base uint8) bool {
-	count := uint8(1)
-
 	if number == 0 {
-		return count <= uint8(len(s.digitPins))
+		return len(s.digitPins) >= 1
 	}
 
+	count := 0
 	if number < 0 {
-		count++
+		count = 1
 		number = -number
 	}
 
-	for ; number > 0; number /= int32(base) {
+	for number > 0 {
 		count++
+		number /= int32(base)
 	}
-	count--
 
-	return count <= uint8(len(s.digitPins))
+	return count <= len(s.digitPins)
 }
 
 // charToSegmentPattern converts a character to its corresponding segment
@@ -652,22 +662,17 @@ func (s *SevSeg) setNumberInitPattern() {
 // setSegmentPins sets the segment pins according to the current digit to
 // refresh and the updated display pattern.
 func (s *SevSeg) setSegmentPins() {
-	for i, pin := range s.segmentPins {
-		pattern := s.updatedDisplay[s.currentDigitToRefresh]
-		segmentOn := (pattern & (1 << i)) != 0
+	pattern := s.updatedDisplay[s.currentDigitToRefresh]
 
-		if s.config == CommonCathode {
-			if segmentOn {
-				pin.High()
-			} else {
-				pin.Low()
-			}
-		} else { // CommonAnode
-			if segmentOn {
-				pin.Low()
-			} else {
-				pin.High()
-			}
+	if s.config == CommonAnode {
+		pattern = ^pattern
+	}
+
+	for i, pin := range s.segmentPins {
+		if (pattern & (1 << i)) != 0 {
+			pin.High()
+		} else {
+			pin.Low()
 		}
 	}
 }
@@ -710,17 +715,19 @@ func (s *SevSeg) updateDisplayFromPatterns() {
 
 	if patternLength > displayWidth {
 		for i := range displayWidth {
-			patternIndex := (s.scrollPosition + i) % patternLength
+			patternIndex := (int(s.scrollPosition) + i) % patternLength
 			s.updatedDisplay[displayWidth-1-i] = s.textPattern[patternIndex]
 		}
-	} else {
-		blankPattern := s.getSegmentCode(36) // BLANK
-		for i := range displayWidth {
-			if i < patternLength {
-				s.updatedDisplay[displayWidth-1-i] = s.textPattern[i]
-			} else {
-				s.updatedDisplay[displayWidth-1-i] = blankPattern
-			}
+
+		return
+	}
+
+	blankPattern := s.getSegmentCode(36) // BLANK
+	for i := range displayWidth {
+		if i < patternLength {
+			s.updatedDisplay[displayWidth-1-i] = s.textPattern[i]
+		} else {
+			s.updatedDisplay[displayWidth-1-i] = blankPattern
 		}
 	}
 }
