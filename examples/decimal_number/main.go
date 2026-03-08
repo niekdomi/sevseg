@@ -8,7 +8,7 @@ import (
 	"machine"
 	"time"
 
-	"github.com/domi413/sevseg"
+	"github.com/niekdomi/sevseg"
 )
 
 func main() {
@@ -37,7 +37,7 @@ func main() {
 	}
 
 	examples := []struct {
-		number  int8
+		number  int32
 		decimal uint8
 	}{
 		{42, 0},

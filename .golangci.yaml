@@ -1,0 +1,21 @@
+version: "2"
+
+linters:
+  default: all
+  disable:
+    - noinlineerr
+    - wsl
+    - mnd
+
+  settings:
+    varnamelen:
+      min-name-length: 1
+
+    gosec:
+      excludes:
+        - G115
+
+formatters:
+  enable:
+    - gofmt
+    - golines

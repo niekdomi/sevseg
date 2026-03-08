@@ -11,12 +11,12 @@ improved for TinyGo.
 
 ## Installation
 
-Include `import "github.com/domi413/sevseg"` in your TinyGo project and run the
+Include `import "github.com/niekdomi/sevseg"` in your TinyGo project and run the
 following commands to set up the module:
 
 ```bash
 go mod init {your-project} # May already be done
-go get github.com/domi413/sevseg@main
+go get github.com/niekdomi/sevseg@main
 ```
 
 ## Hardware Setup
@@ -61,7 +61,7 @@ package main
 import (
 	"machine"
 	"time"
-	"github.com/domi413/sevseg"
+	"github.com/niekdomi/sevseg"
 )
 
 func main() {
@@ -282,7 +282,7 @@ less than or equal to the display width.
 #### `Refresh() bool`
 
 Refreshes the display by cycling through each digit. Must be called frequently
-(recommended >100Hz, e.g., every 10ms) to maintain a stable, flicker-free
+(recommended >100Hz, every 10ms) to maintain a stable, flicker-free
 display.
 todo:
 
@@ -296,7 +296,7 @@ todo:
 
 ### Display is Dim or Flickering
 
-- Ensure `Refresh()` is called with at least 100Hz (e.g., every 10ms).
+- Ensure `Refresh()` is called with at least 100Hz (every 10ms).
 - Verify resistor values (too high resistance can cause dimming).
 - Check the power supply’s current capacity.
 - For brightness control, ensure PWM pins are correctly configured if using

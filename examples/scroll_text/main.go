@@ -1,6 +1,6 @@
 // This script shows the ability to scroll text on a 4-digit 7-segment display.
 //
-// This configures a 2-digit 7-segment Common Cathode display for raspberry pi pico 2
+// This configures a 4-digit 7-segment Common Cathode display for raspberry pi pico 2
 
 package main
 
@@ -8,7 +8,7 @@ import (
 	"machine"
 	"time"
 
-	"github.com/domi413/sevseg"
+	"github.com/niekdomi/sevseg"
 )
 
 func main() {
@@ -30,6 +30,7 @@ func main() {
 			machine.GP10, // G
 			machine.GP11, // DP
 		},
+		PWMType:         sevseg.SoftwarePWM,
 		UseLeadingZeros: false,
 	}
 
