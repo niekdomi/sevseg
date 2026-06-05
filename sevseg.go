@@ -24,10 +24,31 @@ const (
 	HardwarePWM
 )
 
-// type pwmChannelMap struct {
-// 	pwm     machine.PWM
-// 	channel uint8
-// }
+// PWMPeripheral is the subset of TinyGo's PWM peripheral API that this library
+// needs for hardware-PWM brightness control.
+//
+// The concrete PWM type is named differently per chip (machine.PWM on AVR/nrf,
+// the pwmGroup behind machine.PWM0..PWM7 on the RP2040, machine.TCCx on SAMD,
+// ...), but they all expose this same method set. Passing them through an
+// interface keeps this package portable across those targets.
+//
+// machine.PWM and machine.TCC have value/pointer receivers respectively, so
+// depending on the target you pass either the peripheral or its address, e.g.
+// machine.Timer0 (AVR) or &machine.PWM0 (RP2040).
+type PWMPeripheral interface {
+	Configure(config machine.PWMConfig) error
+	Channel(pin machine.Pin) (uint8, error)
+	Top() uint32
+	Set(channel uint8, value uint32)
+	SetInverting(channel uint8, inverting bool)
+}
+
+// pwmDigit binds a digit's common pin to the PWM peripheral/channel that drives
+// it when hardware PWM is enabled.
+type pwmDigit struct {
+	pwm     PWMPeripheral
+	channel uint8
+}
 
 // CommonAnode and CommonCathode define the type of 7-segment display.
 type DisplayType uint8
@@ -43,15 +64,19 @@ type Config struct {
 	// It can be either CommonAnode or CommonCathode.
 	Hardware DisplayType
 
-	// PWM defines the type of PWM used for brightness control.
+	// PWMType defines the type of PWM used for brightness control.
 	//
-	// If you want to use the hardware PWM you need to configure PWMTimers and
-	// PWMPins.
+	// If you want to use hardware PWM you must also provide PWMPeripherals.
 	PWMType PWMType
 
-	// PWMPins defines the PWM pins e.g., [machine.Timer0, machine.Timer1] or
-	// [machine.PWM3, machine.PWM4] depending on the board.
-	// PWMPins []machine.PWM
+	// PWMPeripherals lists the PWM peripherals used for hardware-PWM brightness
+	// control, e.g. []sevseg.PWMPeripheral{machine.Timer0, machine.Timer1} on
+	// AVR or {&machine.PWM0, &machine.PWM1} on the RP2040.
+	//
+	// Brightness is applied by PWMing each digit's common pin, so every pin in
+	// DigitPins must be drivable by one of these peripherals. Only used when
+	// PWMType is HardwarePWM.
+	PWMPeripherals []PWMPeripheral
 
 	// DigitPins defines the pins used control/multiplex the digits.
 	DigitPins []machine.Pin
@@ -74,9 +99,16 @@ type SevSeg struct {
 	useLeadingZeros bool
 
 	// Internal state
-	enabled    bool
-	brightness uint8
-	// pwmChannels map[machine.Pin]pwmChannelMap
+	//
+	// userEnabled is the persistent on/off state set via On/Off/Toggle/
+	// SetBrightness. It is kept separate from the transient software-PWM duty
+	// gate so that a Refresh never silently turns the display back on.
+	userEnabled bool
+	brightness  uint8
+
+	// digitPWM maps each digit (by index into digitPins) to the PWM peripheral
+	// and channel that drives it. Only populated when pwm == HardwarePWM.
+	digitPWM []pwmDigit
 
 	// Text scrolling state
 	scrollPosition uint8
@@ -103,23 +135,22 @@ func NewSevSeg(cfg Config) (*SevSeg, bool) {
 	}
 
 	s := &SevSeg{
-		config:          cfg.Hardware,
-		pwm:             cfg.PWMType,
-		digitPins:       cfg.DigitPins,
-		segmentPins:     cfg.SegmentPins,
-		useLeadingZeros: cfg.UseLeadingZeros,
-		brightness:      100,
-		enabled:         true,
-		// pwmChannels:           make(map[machine.Pin]pwmChannelMap),
+		config:                cfg.Hardware,
+		pwm:                   cfg.PWMType,
+		digitPins:             cfg.DigitPins,
+		segmentPins:           cfg.SegmentPins,
+		useLeadingZeros:       cfg.UseLeadingZeros,
+		brightness:            100,
+		userEnabled:           true,
 		updatedDisplay:        make([]uint8, len(cfg.DigitPins)),
 		currentDigitToRefresh: 0,
 	}
 
-	// if s.pwm == HardwarePWM && !s.configurePWM(cfg.PWMPins) {
-	// 	return nil, false
-	// }
+	if s.pwm == HardwarePWM && !s.configurePWM(cfg.PWMPeripherals) {
+		return nil, false
+	}
 
-	s.clearDigitPins()
+	s.allDigitsOff()
 	s.clearSegmentPins()
 
 	return s, true
@@ -160,7 +191,7 @@ func (s *SevSeg) DisplayTest(delayMS uint16) {
 
 // IsEnabled returns whether the display is currently enabled
 func (s *SevSeg) IsEnabled() bool {
-	return s.enabled
+	return s.userEnabled
 }
 
 // Toggle can be used to toggle/blink the display. A boolean value is passed to
@@ -169,7 +200,7 @@ func (s *SevSeg) IsEnabled() bool {
 // Since this library doesn't handle timing, the blinking interval must be
 // handled by the user by passing a toggling boolean value.
 func (s *SevSeg) Toggle(enable bool) {
-	s.enabled = enable
+	s.userEnabled = enable
 }
 
 // Clear clears the display by setting all segments to blank.
@@ -184,14 +215,14 @@ func (s *SevSeg) Clear() {
 //
 // This turns off the display immediately without calling Refresh.
 func (s *SevSeg) Off() {
-	s.enabled = false
+	s.userEnabled = false
 	s.clearDigitPins()
 	s.clearSegmentPins()
 }
 
 // On turns the display on.
 func (s *SevSeg) On() {
-	s.enabled = true
+	s.userEnabled = true
 
 	if s.brightness == 0 {
 		s.brightness = 100
@@ -220,9 +251,9 @@ func (s *SevSeg) GetBrightness() uint8 {
 // Any value greater than 100 will be clamped to 100.
 func (s *SevSeg) SetBrightness(brightness uint8) {
 	if brightness == 0 {
-		s.enabled = false
+		s.userEnabled = false
 	} else {
-		s.enabled = true
+		s.userEnabled = true
 	}
 
 	if brightness > 100 {
@@ -277,7 +308,7 @@ func (s *SevSeg) SetNumberFloat(number float32, decimalPlaces uint8) bool {
 		scale *= 10
 	}
 
-	scaled := int32(number * float32(scale))
+	scaled := roundToInt32(number * float32(scale))
 
 	if !s.SetNumberWithDecimal(scaled, decimalPlaces) {
 		return false
@@ -310,14 +341,16 @@ func (s *SevSeg) SetNumberWithMultipleDecimals(number int32, decimalPointsPositi
 		return false
 	}
 
-	for _, decimalPos := range decimalPointsPositions {
-		if decimalPos > uint8(len(s.digitPins)) {
-			return false
-		}
-	}
-
 	if len(s.segmentPins) < 8 {
 		return false
+	}
+
+	// Valid positions index directly into updatedDisplay, so they must be in
+	// range [0, len(digitPins)-1].
+	for _, decimalPos := range decimalPointsPositions {
+		if decimalPos >= uint8(len(s.digitPins)) {
+			return false
+		}
 	}
 
 	if !s.SetNumber(number) {
@@ -325,10 +358,6 @@ func (s *SevSeg) SetNumberWithMultipleDecimals(number int32, decimalPointsPositi
 	}
 
 	for _, decimalPos := range decimalPointsPositions {
-		if decimalPos > uint8(len(s.digitPins)) {
-			return false
-		}
-
 		s.updatedDisplay[decimalPos] |= s.getSegmentCode(38) // DECIMAL POINT
 	}
 
@@ -337,7 +366,7 @@ func (s *SevSeg) SetNumberWithMultipleDecimals(number int32, decimalPointsPositi
 
 // SetHex sets the number to be displayed as a hexadecimal value.
 func (s *SevSeg) SetHex(number uint32) bool {
-	if !s.checkAvailableDigits(int32(number), 16) {
+	if !s.checkAvailableDigitsUnsigned(number, 16) {
 		return false
 	}
 
@@ -372,9 +401,9 @@ func (s *SevSeg) SetTemperature(temperature float32, decimalPlaces uint8) bool {
 		scale *= 10
 	}
 
-	scaled := int32(temperature * float32(scale))
+	scaled := roundToInt32(temperature * float32(scale))
 
-	if !s.checkAvailableDigits(int32(scaled), 10) {
+	if !s.checkAvailableDigits(scaled, 10) {
 		return false
 	}
 
@@ -396,7 +425,7 @@ func (s *SevSeg) SetTemperature(temperature float32, decimalPlaces uint8) bool {
 
 // SetTemperatureWithUnit sets the temperature to be displayed in °C or °F.
 // Note that two digits are required to show °C / °F
-func (s *SevSeg) SetTemperatureWithUnit(temperature float32, decimalPlaces uint8, unit tempUnit) bool {
+func (s *SevSeg) SetTemperatureWithUnit(temperature float32, decimalPlaces uint8, unit TempUnit) bool {
 	if len(s.digitPins) <= 2 {
 		return false // We need at least 3 digits to display a number
 	}
@@ -445,7 +474,13 @@ func (s *SevSeg) SetSegment(pattern []uint8) bool {
 		return false
 	}
 
-	copy(s.updatedDisplay, pattern)
+	n := copy(s.updatedDisplay, pattern)
+
+	// Clear the remaining (left-most) digits that the pattern did not cover.
+	blank := s.getSegmentCode(36) // BLANK
+	for i := n; i < len(s.updatedDisplay); i++ {
+		s.updatedDisplay[i] = blank
+	}
 
 	return true
 }
@@ -458,10 +493,6 @@ func (s *SevSeg) SetSegment(pattern []uint8) bool {
 // than the number of digits, the remaining segments (on the right) will be cut
 // off. You can use ScrollTextLeft or ScrollTextRight to scroll the text.
 func (s *SevSeg) SetText(text string) bool {
-	s.Clear()
-
-	s.scrollPosition = 0
-
 	textLength := len(text)
 	displayWidth := len(s.digitPins)
 	reservedTextLength := textLength
@@ -469,7 +500,10 @@ func (s *SevSeg) SetText(text string) bool {
 	if textLength > displayWidth {
 		reservedTextLength += displayWidth
 	}
-	s.textPattern = make([]uint8, reservedTextLength)
+
+	// Build and validate the full pattern before mutating any display state, so
+	// an unsupported character leaves the current display untouched.
+	pattern := make([]uint8, reservedTextLength)
 
 	for i, char := range []byte(text) {
 		segment, ok := s.charToSegmentPattern(char)
@@ -477,14 +511,18 @@ func (s *SevSeg) SetText(text string) bool {
 			return false
 		}
 
-		s.textPattern[i] = segment
+		pattern[i] = segment
 	}
 
 	if textLength > displayWidth {
 		for i := range displayWidth {
-			s.textPattern[textLength+i] = s.getSegmentCode(36) // BLANK
+			pattern[textLength+i] = s.getSegmentCode(36) // BLANK
 		}
 	}
+
+	s.Clear()
+	s.scrollPosition = 0
+	s.textPattern = pattern
 
 	s.updateDisplayFromPatterns()
 
@@ -519,33 +557,31 @@ func (s *SevSeg) ScrollTextRight() {
 
 // Refresh updates the display. Must be called periodically, ideally with >100Hz
 // to avoid flicker.
+//
+// Refresh mutates the internal scan/PWM state and the pin outputs. It is not
+// safe to call concurrently with itself or with the Set*/Clear/On/Off methods;
+// drive it from a single context (e.g. the main loop or one timer interrupt).
 func (s *SevSeg) Refresh() bool {
 	if len(s.updatedDisplay) == 0 {
 		return false
 	}
 
-	s.clearDigitPins()
+	s.allDigitsOff()
 
+	// dutyOn reflects the brightness duty cycle for this Refresh tick. For
+	// hardware PWM the brightness is applied by the PWM peripheral itself, so
+	// the segments are always driven and the duty is handled in hardware.
+	dutyOn := true
 	if s.pwm == SoftwarePWM {
-		s.softwarePWM()
-	} else {
-		// s.hardwarePWM()
+		dutyOn = s.softwarePWM()
 	}
 
-	if !s.enabled {
+	if !s.userEnabled || !dutyOn {
 		return false
 	}
 
 	s.setSegmentPins()
-
-	// Turn on the current digit
-	if s.currentDigitToRefresh < uint8(len(s.digitPins)) {
-		if s.config == CommonCathode {
-			s.digitPins[s.currentDigitToRefresh].Low()
-		} else {
-			s.digitPins[s.currentDigitToRefresh].High()
-		}
-	}
+	s.enableDigit(s.currentDigitToRefresh)
 
 	s.currentDigitToRefresh = (s.currentDigitToRefresh + 1) % uint8(len(s.digitPins))
 
@@ -571,6 +607,34 @@ func (s *SevSeg) checkAvailableDigits(number int32, base uint8) bool {
 	}
 
 	return count <= len(s.digitPins)
+}
+
+// checkAvailableDigitsUnsigned checks if an unsigned number can fit within the
+// available digits for the specified base.
+//
+// It exists separately from checkAvailableDigits because casting a uint32 to
+// int32 would wrap large values into negatives and badly undercount the digits.
+func (s *SevSeg) checkAvailableDigitsUnsigned(number uint32, base uint8) bool {
+	if number == 0 {
+		return len(s.digitPins) >= 1
+	}
+
+	count := 0
+	for number > 0 {
+		count++
+		number /= uint32(base)
+	}
+
+	return count <= len(s.digitPins)
+}
+
+// roundToInt32 rounds a float to the nearest int32, away from zero on ties.
+func roundToInt32(value float32) int32 {
+	if value < 0 {
+		return int32(value - 0.5)
+	}
+
+	return int32(value + 0.5)
 }
 
 // charToSegmentPattern converts a character to its corresponding segment
@@ -624,27 +688,90 @@ func (s *SevSeg) clearSegmentPins() {
 	}
 }
 
-// configurePWM sets up PWM channels for segment pins if HardwarePWM is used.
-// func (s *SevSeg) configurePWM(pwmPins []machine.PWM) bool {
-// 	for _, timer := range pwmPins {
-// 		timer.Configure(machine.PWMConfig{})
-// 	}
+// configurePWM maps every digit pin to a PWM channel for hardware-PWM
+// brightness control. Brightness is applied by PWMing the digits' common pins,
+// so each digit pin must be drivable by one of the supplied peripherals.
+//
+// It returns false if no peripherals were given, a peripheral fails to
+// configure, or a digit pin cannot be driven by any of them.
+func (s *SevSeg) configurePWM(peripherals []PWMPeripheral) bool {
+	if len(peripherals) == 0 {
+		return false
+	}
 
-// 	for _, segmentPin := range s.segmentPins {
-// 		found := false
-// 		for _, timer := range pwmPins {
-// 			if ch, err := timer.Channel(segmentPin); err == nil {
-// 				s.pwmChannels[segmentPin] = pwmChannelMap{pwm: timer, channel: ch}
-// 				found = true
-// 				break
-// 			}
-// 		}
-// 		if !found {
-// 			return false
-// 		}
-// 	}
-// 	return true
-// }
+	for _, p := range peripherals {
+		if p.Configure(machine.PWMConfig{}) != nil {
+			return false
+		}
+	}
+
+	// Common-cathode digits are active-low, so the PWM output is inverted to
+	// keep "higher brightness == longer active time" for both display types.
+	inverting := s.config == CommonCathode
+
+	s.digitPWM = make([]pwmDigit, len(s.digitPins))
+
+	for i, pin := range s.digitPins {
+		found := false
+
+		for _, p := range peripherals {
+			ch, err := p.Channel(pin)
+			if err != nil {
+				continue
+			}
+
+			p.SetInverting(ch, inverting)
+			p.Set(ch, 0) // Start with the digit off.
+			s.digitPWM[i] = pwmDigit{pwm: p, channel: ch}
+			found = true
+
+			break
+		}
+
+		if !found {
+			return false
+		}
+	}
+
+	return true
+}
+
+// allDigitsOff turns every digit off, using PWM channels under hardware PWM and
+// plain GPIO otherwise.
+func (s *SevSeg) allDigitsOff() {
+	if s.pwm == HardwarePWM {
+		for _, d := range s.digitPWM {
+			d.pwm.Set(d.channel, 0)
+		}
+
+		return
+	}
+
+	s.clearDigitPins()
+}
+
+// enableDigit turns on a single digit. Under hardware PWM the digit's common
+// pin is driven at the configured brightness duty cycle; otherwise it is driven
+// fully on via GPIO.
+func (s *SevSeg) enableDigit(digit uint8) {
+	if int(digit) >= len(s.digitPins) {
+		return
+	}
+
+	if s.pwm == HardwarePWM {
+		d := s.digitPWM[digit]
+		duty := (d.pwm.Top() * uint32(s.brightness)) / 100
+		d.pwm.Set(d.channel, duty)
+
+		return
+	}
+
+	if s.config == CommonCathode {
+		s.digitPins[digit].Low()
+	} else {
+		s.digitPins[digit].High()
+	}
+}
 
 // setNumberInitPattern sets the initial pattern for the display when a number
 // is set.
@@ -677,35 +804,20 @@ func (s *SevSeg) setSegmentPins() {
 	}
 }
 
-// hardwarePWM is a hardware controlled PWM that sets the segments on the
-// display with the according brightness.
-// func (s *SevSeg) hardwarePWM() {
-// 	s.enabled = s.brightness > 0
-
-// 	if !s.enabled {
-// 		return
-// 	}
-
-// 	// FIXME:
-// 	if s.currentDigitToRefresh < uint8(len(s.digitPins)) {
-// 		if channelMap, exists := s.pwmChannels[s.digitPins[s.currentDigitToRefresh]]; exists {
-// 			duty := (channelMap.pwm.Top() * uint32(s.brightness)) / 100
-// 			channelMap.pwm.Set(channelMap.channel, duty)
-// 		}
-// 	}
-// }
-
-// softwarePWM is a software controlled PWM that sets the segments on the
-// display with the according brightness.
-func (s *SevSeg) softwarePWM() {
+// softwarePWM advances the software PWM counter and reports whether the
+// display should be driven during this part of the duty cycle.
+//
+// It intentionally does not touch userEnabled: the duty gate is transient and
+// recomputed every Refresh, whereas userEnabled is the persistent on/off state.
+func (s *SevSeg) softwarePWM() bool {
 	const pwmPeriod = uint8(10)
 
 	s.pwmCounter = (s.pwmCounter + 1) % pwmPeriod
 
-	// Enable display only during "on" portion of PWM cycle
-	// Special cases: 0 = always off, 10 = always on
+	// Drive the display only during the "on" portion of the PWM cycle.
+	// Special cases: 0 = always off, 10 = always on.
 	brightnessLevel := (s.brightness + 9) / 10
-	s.enabled = brightnessLevel > 0 && (brightnessLevel >= 10 || s.pwmCounter < brightnessLevel)
+	return brightnessLevel > 0 && (brightnessLevel >= 10 || s.pwmCounter < brightnessLevel)
 }
 
 // updateDisplayFromPatterns updates the display buffer from the text pattern.
@@ -732,54 +844,59 @@ func (s *SevSeg) updateDisplayFromPatterns() {
 	}
 }
 
+// segmentCodes maps an internal character index to its 7-segment bit pattern
+// (GFEDCBA in bits 0-6, decimal point in bit 7).
+//
+// It is declared at package scope so it is not re-allocated on every lookup,
+// which matters on the memory-constrained targets this library runs on.
+var segmentCodes = [...]uint8{
+	//.GFEDCBA   Index   ASCII   Symbol   7-segment map:
+	0b00111111, // 0       0      '0'          AAA
+	0b0000110,  // 1       1      '1'         F   B
+	0b01011011, // 2       2      '2'         F   B
+	0b01001111, // 3       3      '3'          GGG
+	0b01100110, // 4       4      '4'         E   C
+	0b01101101, // 5       5      '5'         E   C
+	0b01111101, // 6       6      '6'          DDD
+	0b00000111, // 7       7      '7'
+	0b01111111, // 8       8      '8'
+	0b01101111, // 9       9      '9'
+
+	0b01110111, // 10     65      'A'
+	0b01111100, // 11     66      'b'
+	0b00111001, // 12     67      'C'
+	0b01011110, // 13     68      'd'
+	0b01111001, // 14     69      'E'
+	0b01110001, // 15     70      'F'
+	0b00111101, // 16     71      'G'
+	0b01110110, // 17     72      'H'
+	0b00110000, // 18     73      'I'
+	0b00001110, // 19     74      'J'
+	0b01110110, // 20     75      'K'  Same as 'H'
+	0b00111000, // 21     76      'L'
+	0b00000000, // 22     77      'M'  NO DISPLAY
+	0b01010100, // 23     78      'n'
+	0b00111111, // 24     79      'O'
+	0b01110011, // 25     80      'P'
+	0b01100111, // 26     81      'q'
+	0b01010000, // 27     82      'r'
+	0b01101101, // 28     83      'S'
+	0b01111000, // 29     84      't'
+	0b00111110, // 30     85      'U'
+	0b00111110, // 31     86      'V'  Same as 'U'
+	0b00000000, // 32     87      'W'  NO DISPLAY
+	0b01110110, // 33     88      'X'  Same as 'H'
+	0b01101110, // 34     89      'y'
+	0b01011011, // 35     90      'Z'  Same as '2'
+
+	0b00000000, // 36     32      ' '  BLANK
+	0b01000000, // 37     45      '-'  DASH / MINUS
+	0b10000000, // 38     46      '.'  PERIOD / DECIMAL POINT
+	0b01100011, // 39     42      '°'  DEGREE
+	0b00001000, // 40     95      '_'  UNDERSCORE
+}
+
 // getSegmentCode returns the segment code for a given index.
 func (s *SevSeg) getSegmentCode(index uint8) uint8 {
-	codes := []uint8{
-		// GFEDCBA   Index   ASCII   Symbol   7-segment map:
-		0b00111111, // 0       0      '0'          AAA
-		0b0000110,  // 1       1      '1'         F   B
-		0b01011011, // 2       2      '2'         F   B
-		0b01001111, // 3       3      '3'          GGG
-		0b01100110, // 4       4      '4'         E   C
-		0b01101101, // 5       5      '5'         E   C
-		0b01111101, // 6       6      '6'          DDD
-		0b00000111, // 7       7      '7'
-		0b01111111, // 8       8      '8'
-		0b01101111, // 9       9      '9'
-
-		0b01110111, // 10     65      'A'
-		0b01111100, // 11     66      'b'
-		0b00111001, // 12     67      'C'
-		0b01011110, // 13     68      'd'
-		0b01111001, // 14     69      'E'
-		0b01110001, // 15     70      'F'
-		0b00111101, // 16     71      'G'
-		0b01110110, // 17     72      'H'
-		0b00110000, // 18     73      'I'
-		0b00001110, // 19     74      'J'
-		0b01110110, // 20     75      'K'  Same as 'H'
-		0b00111000, // 21     76      'L'
-		0b00000000, // 22     77      'M'  NO DISPLAY
-		0b01010100, // 23     78      'n'
-		0b00111111, // 24     79      'O'
-		0b01110011, // 25     80      'P'
-		0b01100111, // 26     81      'q'
-		0b01010000, // 27     82      'r'
-		0b01101101, // 28     83      'S'
-		0b01111000, // 29     84      't'
-		0b00111110, // 30     85      'U'
-		0b00111110, // 31     86      'V'  Same as 'U'
-		0b00000000, // 32     87      'W'  NO DISPLAY
-		0b01110110, // 33     88      'X'  Same as 'H'
-		0b01101110, // 34     89      'y'
-		0b01011011, // 35     90      'Z'  Same as '2'
-
-		0b00000000, // 36     32      ' '  BLANK
-		0b01000000, // 37     45      '-'  DASH / MINUS
-		0b10000000, // 38     46      '.'  PERIOD / DECIMAL POINT
-		0b01100011, // 39     42      '°'  DEGREE
-		0b00001000, // 40     95      '_'  UNDERSCORE
-	}
-
-	return codes[index]
+	return segmentCodes[index]
 }
